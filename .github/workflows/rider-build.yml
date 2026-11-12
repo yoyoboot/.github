@@ -1,0 +1,186 @@
+name: Build Rider images
+run-name: Rider · ${{ github.event.client_payload.source_sha }} · ${{ github.event.client_payload.request.build_mode }}
+
+on:
+  repository_dispatch:
+    types: [rider-build-request]
+
+permissions: {}
+
+jobs:
+  validate-request:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      source-sha: ${{ steps.validate.outputs.source_sha }}
+      source-ref: ${{ steps.validate.outputs.source_ref }}
+      build-mode: ${{ steps.validate.outputs.build_mode }}
+    steps:
+      - name: Validate signed Rider request
+        id: validate
+        shell: bash
+        env:
+          DISPATCH_HMAC_SECRET: ${{ secrets.RIDER_DISPATCH_HMAC_SECRET }}
+          PROTOCOL: ${{ github.event.client_payload.protocol }}
+          SOURCE_REPOSITORY: ${{ github.event.client_payload.source_repository }}
+          SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+          SOURCE_BEFORE_SHA: ${{ github.event.client_payload.source_before_sha }}
+          SOURCE_RUN_ID: ${{ github.event.client_payload.source_run_id }}
+          BUILD_INTENT: ${{ github.event.client_payload.request.build_intent }}
+          BUILD_TARGET: ${{ github.event.client_payload.request.build_target }}
+          BUILD_MODE: ${{ github.event.client_payload.request.build_mode }}
+          ISSUED_AT: ${{ github.event.client_payload.issued_at }}
+          NONCE: ${{ github.event.client_payload.nonce }}
+          SIGNATURE: ${{ github.event.client_payload.signature }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, datetime, hashlib, hmac, os, re, subprocess
+          env = os.environ
+          if env['SOURCE_REPOSITORY'] != 'ltm0203/Knight-boss':
+              raise SystemExit('Request must originate from the configured Rider repository.')
+          if not env.get('DISPATCH_HMAC_SECRET'):
+              raise SystemExit('RIDER_DISPATCH_HMAC_SECRET is required.')
+          if env['PROTOCOL'] != 'yoyoboot-public-build/v4':
+              raise SystemExit('Unsupported protocol.')
+          ref = env['SOURCE_REF']
+          branch = ref.removeprefix('refs/heads/')
+          if not ref.startswith('refs/heads/') or subprocess.run(['git', 'check-ref-format', ref], capture_output=True).returncode != 0:
+              raise SystemExit('Unsupported branch ref.')
+          for key in ('SOURCE_SHA', 'SOURCE_BEFORE_SHA'):
+              if not re.fullmatch(r'[0-9a-f]{40}', env[key]):
+                  raise SystemExit('Invalid source SHA.')
+          if env['SOURCE_SHA'] == '0' * 40:
+              raise SystemExit('Deleted branch requests are not supported.')
+          if not re.fullmatch(r'[1-9][0-9]*', env['SOURCE_RUN_ID']):
+              raise SystemExit('Invalid source run id.')
+          if env['BUILD_INTENT'] != 'image' or env['BUILD_TARGET'] != 'all':
+              raise SystemExit('Rider only builds all six images.')
+          if env['BUILD_MODE'] not in ('validate', 'publish') or (env['BUILD_MODE'] == 'publish' and branch != 'main'):
+              raise SystemExit('Publishing is only allowed on main.')
+          if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', env['NONCE']):
+              raise SystemExit('Invalid nonce.')
+          issued = datetime.datetime.strptime(env['ISSUED_AT'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+          if abs((datetime.datetime.now(datetime.timezone.utc) - issued).total_seconds()) > 600:
+              raise SystemExit('Request expired; send a fresh signed request from the private repository.')
+          keys = ('PROTOCOL', 'SOURCE_REPOSITORY', 'SOURCE_REF', 'SOURCE_SHA', 'SOURCE_BEFORE_SHA',
+                  'SOURCE_RUN_ID', 'BUILD_INTENT', 'BUILD_TARGET', 'BUILD_MODE', 'ISSUED_AT', 'NONCE')
+          material = ''.join(env[key] + '\n' for key in keys)
+          expected = base64.b64encode(hmac.new(env['DISPATCH_HMAC_SECRET'].encode(), material.encode(), hashlib.sha256).digest()).decode()
+          if not hmac.compare_digest(expected, env['SIGNATURE']):
+              raise SystemExit('Invalid signature.')
+          with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f"source_sha={env['SOURCE_SHA']}\nsource_ref={ref}\nbuild_mode={env['BUILD_MODE']}\n")
+          PY
+
+  build-images:
+    needs: validate-request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - image: hostapi
+            dockerfile: src/aspnet-core/src/YoyoBoot.Template.Web.Host/Dockerfile.github
+          - image: fengshensyncjob
+            dockerfile: src/aspnet-core/src/YoyoBoot.Template.FengShenSyncJob/Dockerfile.github
+          - image: fengshenauth
+            dockerfile: src/aspnet-core/src/YoyoBoot.Template.FengShenAuth/Dockerfile.github
+          - image: migrator
+            dockerfile: src/aspnet-core/src/YoyoBoot.Template.Migrator/Dockerfile.github
+          - image: vue
+            dockerfile: src/vue/Dockerfile.github
+          - image: uni-app
+            dockerfile: src/uni-app/Dockerfile.github
+    env:
+      SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
+      BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
+      IMAGE_SUFFIX: ${{ matrix.image }}
+      # Public build artifacts must not contain private source layers or a full workspace.
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    steps:
+      - name: Check out exact private source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ltm0203/Knight-boss
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.RIDER_PRIVATE_SOURCE_PAT }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify source and choose image identity
+        id: identity
+        shell: bash
+        env:
+          IMAGE_REGISTRY: ${{ vars.RIDER_IMAGE_REGISTRY }}
+          IMAGE_REPOSITORY: ${{ vars.RIDER_IMAGE_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          image="rider-local/${IMAGE_SUFFIX}:${SOURCE_SHA}"
+          if [[ "$BUILD_MODE" == publish ]]; then
+            [[ "$IMAGE_REGISTRY" =~ ^[a-z0-9.-]+(:[0-9]+)?$ ]] || { echo 'Invalid RIDER_IMAGE_REGISTRY.' >&2; exit 1; }
+            [[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]] || { echo 'Invalid RIDER_IMAGE_REPOSITORY (namespace/repository).' >&2; exit 1; }
+            image="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_SUFFIX}_${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          echo "tag=$image" >> "$GITHUB_OUTPUT"
+          echo "build_id=${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in for explicit publication
+        if: ${{ env.BUILD_MODE == 'publish' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.RIDER_IMAGE_REGISTRY }}
+          username: ${{ vars.RIDER_IMAGE_USERNAME }}
+          password: ${{ secrets.RIDER_IMAGE_PASSWORD }}
+      - name: Compile and build image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: source
+          file: source/${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          push: ${{ env.BUILD_MODE == 'publish' }}
+          tags: ${{ steps.identity.outputs.tag }}
+          build-args: |
+            SOURCE_REVISION=${{ env.SOURCE_SHA }}
+            RIDER_BUILD_ID=${{ steps.identity.outputs.build_id }}
+      - name: Image result
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          IMAGE_TAG: ${{ steps.identity.outputs.tag }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "## ${IMAGE_SUFFIX}: ${BUILD_RESULT}"
+            echo "Source: ${SOURCE_SHA}"
+            echo "Mode: ${BUILD_MODE}; image: ${IMAGE_TAG}"
+            echo "Digest: ${IMAGE_DIGEST}"
+            echo 'Automated tests and deployment were not run.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  summary:
+    needs: [validate-request, build-images]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Overall result
+        shell: bash
+        env:
+          REQUEST_RESULT: ${{ needs.validate-request.result }}
+          BUILD_RESULT: ${{ needs.build-images.result }}
+        run: |
+          {
+            echo '## Rider image build'
+            echo "Request: ${REQUEST_RESULT}; six-image build: ${BUILD_RESULT}"
+            echo 'This workflow does not run automated tests or deploy services.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$REQUEST_RESULT" = success && test "$BUILD_RESULT" = success
