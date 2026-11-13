@@ -157,6 +157,9 @@ jobs:
           context: source
           file: source/${{ matrix.dockerfile }}
           platforms: linux/amd64
+          # The existing Aliyun registry rejects OCI attestation manifests.
+          provenance: false
+          sbom: false
           load: true
           push: ${{ env.BUILD_MODE == 'publish' }}
           tags: ${{ steps.identity.outputs.tags }}
