@@ -7,6 +7,11 @@ on:
 
 permissions: {}
 
+# Main fixed tags represent the newest push; superseded publication runs are canceled.
+concurrency:
+  group: ${{ github.event.client_payload.request.build_mode == 'publish' && 'rider-main-publish' || format('rider-build-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event.client_payload.request.build_mode == 'publish' }}
+
 jobs:
   validate-request:
     runs-on: ubuntu-24.04
@@ -124,9 +129,17 @@ jobs:
           if [[ "$BUILD_MODE" == publish ]]; then
             [[ "$IMAGE_REGISTRY" =~ ^[a-z0-9.-]+(:[0-9]+)?$ ]] || { echo 'Invalid RIDER_IMAGE_REGISTRY.' >&2; exit 1; }
             [[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]] || { echo 'Invalid RIDER_IMAGE_REPOSITORY (namespace/repository).' >&2; exit 1; }
-            image="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_SUFFIX}_${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            image="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_SUFFIX}_main"
           fi
           echo "tag=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo 'tags<<RIDER_TAGS'
+            echo "$image"
+            if [[ "$BUILD_MODE" == publish ]]; then
+              echo "${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_SUFFIX}_${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            fi
+            echo 'RIDER_TAGS'
+          } >> "$GITHUB_OUTPUT"
           echo "build_id=${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -146,7 +159,7 @@ jobs:
           platforms: linux/amd64
           load: true
           push: ${{ env.BUILD_MODE == 'publish' }}
-          tags: ${{ steps.identity.outputs.tag }}
+          tags: ${{ steps.identity.outputs.tags }}
           build-args: |
             SOURCE_REVISION=${{ env.SOURCE_SHA }}
             RIDER_BUILD_ID=${{ steps.identity.outputs.build_id }}

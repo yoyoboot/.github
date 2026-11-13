@@ -24,8 +24,7 @@
 | 本仓库，可选推送 | Variable `RIDER_IMAGE_USERNAME` | Registry 登录名 |
 | 本仓库，可选推送 | Secret `RIDER_IMAGE_PASSWORD` | Registry 推送凭据，仅 publish 步骤读取 |
 
-所有合法分支的 push（包括 develop2、fix-prod-1019 及中文分支）固定 `validate`：只编译和制作镜像，不登录或推送 Registry。手动重跑在私有仓库执行；
-只有 `main` 手动选择 `publish` 才会推送。两端使用 git check-ref-format 校验分支格式，不维护名称白名单；tag 和分支删除不触发构建。目标公共仓库和来源私有仓库固定在代码中，不再配置仓库名 Secret。
+所有合法分支均可 push 构建；普通开发分支为 `validate`，不推送。PR 合并到 main（或直接 push main）自动使用 `publish`，编译成功后推送；手动执行仍可明确选择 validate/publish，publish 只允许 main。两端使用 git check-ref-format 校验分支格式，不维护名称白名单；tag 和分支删除不触发构建。目标公共仓库和来源私有仓库固定在代码中，不再配置仓库名 Secret。
 
 签名保持 `yoyoboot-public-build/v4` 的字段布局；Rider 专用策略固定
 `build_intent=image`、`build_target=all`，不计算 before/head 差异。
@@ -36,7 +35,8 @@
 
 - 公共 runner 将私有 Git 根检出到 `source/`；Docker context 为 `source/`，Dockerfile 为 `source/src/.../Dockerfile.github`。
 - 每项的 builder 编译成功后制作运行镜像。矩阵不因单项失败取消其它项，整体摘要准确反映六项结果；某项失败不回滚其它已成功制作/推送的镜像。
-- validate 使用临时本地镜像；runner 结束后不保留镜像。publish 的版本为 `<服务>_<私有SHA>-<公共run_id>-<attempt>`，不覆盖 Gitea 正在使用的固定标签。
+- validate 使用临时本地镜像；runner 结束后不保留镜像。publish 发布 `<服务>_main` 固定标签，并同时保留 `<服务>_<私有SHA>-<公共run_id>-<attempt>` 版本标签；main 发布使用独立并发组，取消被新发布替代的旧运行。
+- 当前沿用阿里云仓库 `registry.cn-chengdu.aliyuncs.com/yoyosoft/knightboss`。推送不是部署，不改现有测试环境使用的 dev/fix-prod 标签。
 - Uni-app 保留 NGINX_WAITHOST/NGINX_WAITPORT（默认 localhost:80）。官方 Nginx 的启动钩子复用 Rider 现有 wait-for-it.sh，在依赖 TCP 就绪后继续原 Nginx 启动流程。
 - 保留源码 revision 和 Vue buildId。摘要给出模式、镜像、digest 和实际结果；不将构建成功写成部署或业务测试通过。
 - 首版只使用 runner 内 BuildKit 缓存，不向公开仓库导出包含私有源码层的构建缓存，不上传整个 checkout 或 Docker build record。
