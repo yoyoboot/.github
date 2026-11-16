@@ -4,11 +4,11 @@
 
 本仓库的 [.github/workflows/rider-build.yml](.github/workflows/rider-build.yml) 接收
 `ltm0203/Knight-boss` 的签名 `rider-build-request`，按请求 SHA 只读检出源码，
-全量编译并制作 HostApi、SyncJob、Auth、Migrator、Vue、Uni-app H5 六个镜像。
+全量编译并制作 HostApi、SyncJob、Migrator、Vue、Uni-app H5 五个镜像。
 这里不保存 Rider 源码副本、不做 PR 状态回写、不运行自动测试、不部署或执行数据库迁移。
 
 目前为本地实现；文件需要提交到本仓库默认分支并配置 Secrets 后才能远程运行。
-私有端也必须提交其 dispatcher、六个 Dockerfile.github 和公网 NuGet.Config，
+私有端也必须提交其 dispatcher、五个 Dockerfile.github 和公网 NuGet.Config，
 才能从对应提交构建。请求发送成功不代表镜像已构建成功，实际结果查看本仓库 Actions。
 
 ### 接入配置
@@ -108,3 +108,6 @@ python src/.github/scripts/testing/test_public_build_runner.py --public-repo ../
 ---
 
 版权所有 © 2025 Yoyo Boot. 保留所有权利。# .github
+
+
+2026-11-16：Rider 已从本地构建矩阵退出 FengShenAuth，现保留 HostAPI、SyncJob、Migrator、Vue、Uni-app 五个镜像；签名触发及 main 发布规则不变。本轮尚未提交推送。

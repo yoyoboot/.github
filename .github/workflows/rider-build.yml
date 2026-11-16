@@ -92,8 +92,6 @@ jobs:
             dockerfile: src/aspnet-core/src/YoyoBoot.Template.Web.Host/Dockerfile.github
           - image: fengshensyncjob
             dockerfile: src/aspnet-core/src/YoyoBoot.Template.FengShenSyncJob/Dockerfile.github
-          - image: fengshenauth
-            dockerfile: src/aspnet-core/src/YoyoBoot.Template.FengShenAuth/Dockerfile.github
           - image: migrator
             dockerfile: src/aspnet-core/src/YoyoBoot.Template.Migrator/Dockerfile.github
           - image: vue
