@@ -8,7 +8,7 @@
 这里不保存 Rider 源码副本、不做 PR 状态回写、不运行自动测试、不部署或执行数据库迁移。
 
 目前为本地实现；文件需要提交到本仓库默认分支并配置 Secrets 后才能远程运行。
-私有端也必须提交其 dispatcher、五个 Dockerfile.github 和公网 NuGet.Config，
+私有端也必须提交其 dispatcher、五个标准 Dockerfile 和公网 NuGet.Config，
 才能从对应提交构建。请求发送成功不代表镜像已构建成功，实际结果查看本仓库 Actions。
 
 ### 接入配置
@@ -33,7 +33,8 @@
 
 ### 产物和结果
 
-- 公共 runner 将私有 Git 根检出到 `source/`；Docker context 为 `source/`，Dockerfile 为 `source/src/.../Dockerfile.github`。
+- 公共 runner 将私有 Git 根检出到 `source/`；Docker context 为 `source/`，Dockerfile 为 `source/src/.../Dockerfile`。
+- 源码 `main` 合入新版 Dockerfile 前，旧提交若仍有内容不同的 `Dockerfile.github`，沿用该提交的迁移版构建定义。切换后删除这一步路径选择。
 - 每项的 builder 编译成功后制作运行镜像。矩阵不因单项失败取消其它项，整体摘要准确反映六项结果；某项失败不回滚其它已成功制作/推送的镜像。
 - validate 使用临时本地镜像；runner 结束后不保留镜像。publish 发布 `<服务>_main` 固定标签，并同时保留 `<服务>_<私有SHA>-<公共run_id>-<attempt>` 版本标签；main 发布使用独立并发组，取消被新发布替代的旧运行。
 - 当前沿用阿里云仓库 `registry.cn-chengdu.aliyuncs.com/yoyosoft/knightboss`。推送不是部署，不改现有测试环境使用的 dev/fix-prod 标签。
