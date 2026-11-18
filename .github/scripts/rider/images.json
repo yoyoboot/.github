@@ -1,0 +1,7 @@
+{
+  "hostapi": "src/aspnet-core/src/YoyoBoot.Template.Web.Host/Dockerfile",
+  "fengshensyncjob": "src/aspnet-core/src/YoyoBoot.Template.FengShenSyncJob/Dockerfile",
+  "migrator": "src/aspnet-core/src/YoyoBoot.Template.Migrator/Dockerfile",
+  "vue": "src/vue/Dockerfile",
+  "uni-app": "src/uni-app/Dockerfile"
+}

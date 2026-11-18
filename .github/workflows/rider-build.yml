@@ -7,13 +7,10 @@ on:
 
 permissions: {}
 
-# Main fixed tags represent the newest push; superseded publication runs are canceled.
-concurrency:
-  group: ${{ github.event.client_payload.request.build_mode == 'publish' && 'rider-main-publish' || format('rider-build-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event.client_payload.request.build_mode == 'publish' }}
-
 jobs:
   validate-request:
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -21,8 +18,14 @@ jobs:
       source-ref: ${{ steps.validate.outputs.source_ref }}
       source-actor: ${{ steps.validate.outputs.source_actor }}
       source-event: ${{ steps.validate.outputs.source_event }}
+      images: ${{ steps.validate.outputs.images }}
       build-mode: ${{ steps.validate.outputs.build_mode }}
     steps:
+      - name: Check out public build scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Validate signed Rider request
         id: validate
         shell: bash
@@ -42,57 +45,7 @@ jobs:
           ISSUED_AT: ${{ github.event.client_payload.issued_at }}
           NONCE: ${{ github.event.client_payload.nonce }}
           SIGNATURE: ${{ github.event.client_payload.signature }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import base64, datetime, hashlib, hmac, os, re, subprocess
-          env = os.environ
-          if env['SOURCE_REPOSITORY'] != 'ltm0203/Knight-boss':
-              raise SystemExit('Request must originate from the configured Rider repository.')
-          if not env.get('DISPATCH_HMAC_SECRET'):
-              raise SystemExit('RIDER_DISPATCH_HMAC_SECRET is required.')
-          protocol = env['PROTOCOL']
-          if protocol not in ('yoyoboot-public-build/v4', 'yoyoboot-public-build/v5', 'yoyoboot-public-build/v6'):
-              raise SystemExit('Unsupported protocol.')
-          ref = env['SOURCE_REF']
-          branch = ref.removeprefix('refs/heads/')
-          if not ref.startswith('refs/heads/') or subprocess.run(['git', 'check-ref-format', ref], capture_output=True).returncode != 0:
-              raise SystemExit('Unsupported branch ref.')
-          if not re.fullmatch(r'[0-9a-f]{40}', env['SOURCE_SHA']):
-              raise SystemExit('Invalid source SHA.')
-          if env['SOURCE_SHA'] == '0' * 40:
-              raise SystemExit('Deleted branch requests are not supported.')
-          if env['BUILD_MODE'] not in ('validate', 'publish') or (env['BUILD_MODE'] == 'publish' and branch != 'main'):
-              raise SystemExit('Publishing is only allowed on main.')
-          issued = datetime.datetime.strptime(env['ISSUED_AT'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
-          if abs((datetime.datetime.now(datetime.timezone.utc) - issued).total_seconds()) > 600:
-              raise SystemExit('Request expired; send a fresh signed request from the private repository.')
-          keys = ('PROTOCOL', 'SOURCE_REPOSITORY', 'SOURCE_REF', 'SOURCE_SHA', 'BUILD_MODE', 'ISSUED_AT')
-          if protocol in ('yoyoboot-public-build/v4', 'yoyoboot-public-build/v5'):
-              # The current Rider main and older commits still send the previous contract.
-              if not re.fullmatch(r'[0-9a-f]{40}', env['SOURCE_BEFORE_SHA']):
-                  raise SystemExit('Invalid source SHA.')
-              if not re.fullmatch(r'[1-9][0-9]*', env['SOURCE_RUN_ID']):
-                  raise SystemExit('Invalid source run id.')
-              if env['BUILD_INTENT'] != 'image' or env['BUILD_TARGET'] != 'all':
-                  raise SystemExit('Rider only builds all five images.')
-              if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', env['NONCE']):
-                  raise SystemExit('Invalid nonce.')
-              keys = ('PROTOCOL', 'SOURCE_REPOSITORY', 'SOURCE_REF', 'SOURCE_SHA', 'SOURCE_BEFORE_SHA',
-                      'SOURCE_RUN_ID', 'BUILD_INTENT', 'BUILD_TARGET', 'BUILD_MODE', 'ISSUED_AT', 'NONCE')
-          actor = event = ''
-          if protocol != 'yoyoboot-public-build/v4':
-              actor, event = env['SOURCE_ACTOR'], env['SOURCE_EVENT']
-              if not re.fullmatch(r'[a-zA-Z0-9-]{1,39}(?:\[bot\])?', actor) or event not in ('push', 'workflow_dispatch'):
-                  raise SystemExit('Invalid source actor or event.')
-              keys += ('SOURCE_ACTOR', 'SOURCE_EVENT')
-          material = ''.join(env[key] + '\n' for key in keys)
-          expected = base64.b64encode(hmac.new(env['DISPATCH_HMAC_SECRET'].encode(), material.encode(), hashlib.sha256).digest()).decode()
-          if not hmac.compare_digest(expected, env['SIGNATURE']):
-              raise SystemExit('Invalid signature.')
-          with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write(f"source_sha={env['SOURCE_SHA']}\nsource_ref={ref}\nbuild_mode={env['BUILD_MODE']}\nsource_actor={actor}\nsource_event={event}\n")
-          PY
+        run: python3 .github/scripts/rider/verify-request.py
 
   build-images:
     needs: validate-request
@@ -102,24 +55,26 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        include:
-          - image: hostapi
-            dockerfile: src/aspnet-core/src/YoyoBoot.Template.Web.Host/Dockerfile
-          - image: fengshensyncjob
-            dockerfile: src/aspnet-core/src/YoyoBoot.Template.FengShenSyncJob/Dockerfile
-          - image: migrator
-            dockerfile: src/aspnet-core/src/YoyoBoot.Template.Migrator/Dockerfile
-          - image: vue
-            dockerfile: src/vue/Dockerfile
-          - image: uni-app
-            dockerfile: src/uni-app/Dockerfile
+        image: ${{ fromJSON(needs.validate-request.outputs.images) }}
+    # Only publication shares a concurrency group. A running push finishes before the next one starts.
+    concurrency:
+      group: ${{ needs.validate-request.outputs.build-mode == 'publish' && 'rider-main-publish' || format('rider-validate-{0}-{1}', github.run_id, matrix.image) }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      images-built: ${{ steps.build.outputs.images_built }}
+      updated-tags: ${{ steps.publish.outputs.updated_tags }}
     env:
       SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
       BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
-      IMAGE_SUFFIX: ${{ matrix.image }}
-      # Public build artifacts must not contain private source layers or a full workspace.
-      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+      IMAGE_SELECTION: ${{ matrix.image }}
     steps:
+      - name: Check out public build scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Check out exact private source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -129,95 +84,43 @@ jobs:
           path: source
           persist-credentials: false
           fetch-depth: 1
-      - name: Verify source and choose image identity
-        id: identity
-        shell: bash
-        env:
-          IMAGE_REGISTRY: ${{ vars.RIDER_IMAGE_REGISTRY }}
-          IMAGE_REPOSITORY: ${{ vars.RIDER_IMAGE_REPOSITORY }}
-        run: |
-          set -euo pipefail
-          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
-          image="rider-local/${IMAGE_SUFFIX}:${SOURCE_SHA}"
-          if [[ "$BUILD_MODE" == publish ]]; then
-            [[ "$IMAGE_REGISTRY" =~ ^[a-z0-9.-]+(:[0-9]+)?$ ]] || { echo 'Invalid RIDER_IMAGE_REGISTRY.' >&2; exit 1; }
-            [[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]] || { echo 'Invalid RIDER_IMAGE_REPOSITORY (namespace/repository).' >&2; exit 1; }
-            image="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_SUFFIX}_main"
-          fi
-          echo "tag=$image" >> "$GITHUB_OUTPUT"
-          {
-            echo 'tags<<RIDER_TAGS'
-            echo "$image"
-            if [[ "$BUILD_MODE" == publish ]]; then
-              echo "${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_SUFFIX}_${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            fi
-            echo 'RIDER_TAGS'
-          } >> "$GITHUB_OUTPUT"
-          echo "build_id=${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-      - name: Select Dockerfile during source cutover
-        id: dockerfile
-        shell: bash
-        env:
-          STANDARD_DOCKERFILE: source/${{ matrix.dockerfile }}
-        run: |
-          set -euo pipefail
-          file="$STANDARD_DOCKERFILE"
-          # Remove after the source main branch adopts the standard definitions.
-          if [[ -f "$file.github" ]] && ! cmp -s "$file" "$file.github"; then
-            file="$file.github"
-          fi
-          test -f "$file"
-          echo "Using $file"
-          echo "path=$file" >> "$GITHUB_OUTPUT"
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Compile and build images
+        id: build
+        shell: bash
+        run: bash .github/scripts/rider/build-images.sh "$IMAGE_SELECTION"
       - name: Log in for explicit publication
-        if: ${{ env.BUILD_MODE == 'publish' }}
+        if: ${{ success() && env.BUILD_MODE == 'publish' && steps.build.outputs.images_built == 'true' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ vars.RIDER_IMAGE_REGISTRY }}
           username: ${{ vars.RIDER_IMAGE_USERNAME }}
           password: ${{ secrets.RIDER_IMAGE_PASSWORD }}
-      - name: Compile and build image
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: source
-          file: ${{ steps.dockerfile.outputs.path }}
-          platforms: linux/amd64
-          # The existing Aliyun registry rejects OCI attestation manifests.
-          provenance: false
-          sbom: false
-          load: true
-          push: ${{ env.BUILD_MODE == 'publish' }}
-          tags: ${{ steps.identity.outputs.tags }}
-          build-args: |
-            SOURCE_REVISION=${{ env.SOURCE_SHA }}
-            RIDER_BUILD_ID=${{ steps.identity.outputs.build_id }}
-      - name: Image result
-        if: ${{ always() }}
+
+      - name: Push Rider images
+        if: ${{ success() && env.BUILD_MODE == 'publish' && steps.build.outputs.images_built == 'true' }}
+        id: publish
         shell: bash
         env:
-          BUILD_RESULT: ${{ steps.build.outcome }}
-          IMAGE_TAG: ${{ steps.identity.outputs.tag }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          {
-            echo "## ${IMAGE_SUFFIX}: ${BUILD_RESULT}"
-            echo "Source: ${SOURCE_SHA}"
-            echo "Mode: ${BUILD_MODE}; image: ${IMAGE_TAG}"
-            echo "Digest: ${IMAGE_DIGEST}"
-            echo 'Automated tests and deployment were not run.'
-          } >> "$GITHUB_STEP_SUMMARY"
+          IMAGE_REGISTRY: ${{ vars.RIDER_IMAGE_REGISTRY }}
+          IMAGE_REPOSITORY: ${{ vars.RIDER_IMAGE_REPOSITORY }}
+        run: bash .github/scripts/rider/publish-images.sh
 
   summary:
     needs: [validate-request, build-images]
     if: ${{ always() }}
     permissions:
       actions: read
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Check out public build scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Overall result
         shell: bash
         env:
@@ -226,7 +129,7 @@ jobs:
         run: |
           {
             echo '## Rider image build'
-            echo "Request: ${REQUEST_RESULT}; five-image build: ${BUILD_RESULT}"
+            echo "Request: ${REQUEST_RESULT}; image pipeline: ${BUILD_RESULT}"
             echo 'This workflow does not run automated tests or deploy services.'
           } >> "$GITHUB_STEP_SUMMARY"
           test "$REQUEST_RESULT" = success && test "$BUILD_RESULT" = success
@@ -242,95 +145,8 @@ jobs:
           SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
           BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
           BUILD_RESULT: ${{ needs.build-images.result }}
+          IMAGES_BUILT: ${{ needs.build-images.outputs.images-built }}
+          UPDATED_TAGS: ${{ needs.build-images.outputs.updated-tags }}
           NOTIFY_WEBHOOK: ${{ secrets.RIDER_BUILD_NOTIFY_WEBHOOK }}
           NOTIFY_SECRET: ${{ secrets.RIDER_BUILD_NOTIFY_SECRET }}
-        run: |
-          python3 - <<'PY'
-          import base64
-          import datetime
-          import hashlib
-          import hmac
-          import json
-          import os
-          import re
-          import urllib.parse
-          import urllib.request
-
-          env = os.environ
-          webhook = env.get('NOTIFY_WEBHOOK', '')
-          secret = env.get('NOTIFY_SECRET', '')
-          if not webhook or not secret:
-              print('::notice::Rider notification skipped: configure the DingTalk webhook and signing secret.')
-              raise SystemExit(0)
-
-          parsed = urllib.parse.urlsplit(webhook)
-          if parsed.scheme != 'https' or parsed.netloc != 'oapi.dingtalk.com' or parsed.path != '/robot/send':
-              print('::warning::Rider notification webhook is not a supported DingTalk robot URL.')
-              raise SystemExit(1)
-
-          repo, run_id = env['GITHUB_REPOSITORY'], env['GITHUB_RUN_ID']
-          run_url = f"{env['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}"
-          publish = env['BUILD_MODE'] == 'publish'
-          result = env['BUILD_RESULT']
-          if result == 'success':
-              title = '✅ Rider 镜像发布成功' if publish else '✅ Rider 构建验证通过'
-              detail = '五个镜像已推送，171 等待手动发布。' if publish else '五个镜像验证通过，未推送。'
-          elif result == 'cancelled':
-              title = '⏹️ Rider 构建已取消'
-              detail = '发布已取消，固定 tag 可能只更新了一部分。' if publish else '本次验证已取消。'
-          else:
-              title = '❌ Rider 镜像发布失败' if publish else '❌ Rider 构建验证失败'
-              detail = '固定 tag 可能只更新了一部分，请核对任务后再发布 171。' if publish else '请查看失败项的构建日志。'
-
-          now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-          branch = env['SOURCE_REF'].removeprefix('refs/heads/')
-          branch = re.sub(r'([\\`*_{}\[\]()#+.!|<>])', r'\\\1', branch)
-          source_repo = 'ltm0203/Knight-boss'
-          source_url = f"{env['GITHUB_SERVER_URL']}/{source_repo}"
-          sha = env['SOURCE_SHA']
-          lines = [f'### {title} · Knight-boss',
-                   '📍 阶段：' + ('镜像发布' if publish else '分支验证'),
-                   f"🕒 时间：{now:%Y-%m-%d %H:%M:%S}（北京时间）",
-                   f'📂 源码仓库：[{source_repo}]({source_url})']
-          actor = env.get('SOURCE_ACTOR', '')
-          if actor:
-              label = '推送者' if env['SOURCE_EVENT'] == 'push' else '发起人'
-              profile = f"{env['GITHUB_SERVER_URL']}/"
-              profile += 'apps/' + actor.removesuffix('[bot]') if actor.endswith('[bot]') else actor
-              display = actor.replace('[', r'\[').replace(']', r'\]')
-              lines.append(f'👤 {label}：[{display}]({profile})')
-          lines += [f'📦 分支：{branch}', f'📝 提交：[{sha}]({source_url}/commit/{sha})',
-                    f'🔗 构建日志：[GitHub Actions #{run_id}]({run_url})']
-          if result == 'success':
-              lines.append('📊 结果：5 / 5 镜像通过')
-          if result != 'success':
-              jobs_url = f"{env['GITHUB_API_URL']}/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=30"
-              try:
-                  request = urllib.request.Request(jobs_url, headers={'Authorization': 'Bearer ' + env['ACTIONS_TOKEN']})
-                  with urllib.request.urlopen(request, timeout=10) as response:
-                      jobs = json.load(response)['jobs']
-                  for job in jobs:
-                      if job['name'].startswith('build-images (') and job['conclusion'] not in ('success', None):
-                          service = job['name'].removeprefix('build-images (').split(',', 1)[0]
-                          lines.append(f"❗ {service} · [{job['conclusion']} 日志]({job['html_url']})")
-              except (OSError, ValueError, KeyError):
-                  print('::warning::Unable to read individual Rider build jobs; sending overall result.')
-          lines.append('🧭 说明：' + detail)
-
-          timestamp = str(int(now.timestamp() * 1000))
-          signature = hmac.digest(secret.encode(), (timestamp + '\n' + secret).encode(), hashlib.sha256)
-          suffix = urllib.parse.urlencode({'timestamp': timestamp, 'sign': base64.b64encode(signature).decode()})
-          uri = parsed._replace(query=f'{parsed.query}&{suffix}', fragment='').geturl()
-          payload = {'msgtype': 'markdown', 'markdown': {'title': title, 'text': '\n\n'.join(lines)}}
-          request = urllib.request.Request(uri, data=json.dumps(payload, ensure_ascii=False).encode(),
-                                           headers={'Content-Type': 'application/json'}, method='POST')
-          try:
-              with urllib.request.urlopen(request, timeout=15) as response:
-                  receipt = json.load(response)
-              if receipt.get('errcode') != 0:
-                  raise ValueError('DingTalk rejected the message')
-          except (OSError, ValueError, AttributeError):
-              print('::warning::Rider DingTalk notification failed. The image build result is unchanged.')
-              raise SystemExit(1)
-          print('Rider DingTalk notification sent.')
-          PY
+        run: python3 .github/scripts/rider/notify-result.py

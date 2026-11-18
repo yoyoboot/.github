@@ -26,7 +26,7 @@
 
 可选群通知在本仓库配置 Actions Secrets `RIDER_BUILD_NOTIFY_WEBHOOK` 和
 `RIDER_BUILD_NOTIFY_SECRET`，分别为钉钉机器人 Webhook 和加签密钥。已验签的构建
-结束后按 validate/publish 的实际结果发一条通知。缺少配置时跳过，发送失败只记警告。
+结束后按 分支验证、正式构建及推送的实际结果发一条通知。缺少配置时跳过，发送失败只记警告。
 Markdown 消息提供可点击的源码仓库、推送者或发起人、完整提交号、构建日志。失败消息附出错服务及任务链接。发布成功表示五镜像已推送，171 仍由运维手动发布。
 
 所有合法分支均可 push 构建；普通开发分支为 `validate`，不推送。PR 合并到 main（或直接 push main）自动使用 `publish`，编译成功后推送；手动执行仍可明确选择 validate/publish，publish 只允许 main。两端使用 git check-ref-format 校验分支格式，不维护名称白名单；tag 和分支删除不触发构建。目标公共仓库和来源私有仓库固定在代码中，不再配置仓库名 Secret。
@@ -42,24 +42,24 @@ Markdown 消息提供可点击的源码仓库、推送者或发起人、完整�
 ### 产物和结果
 
 - 公共 runner 将私有 Git 根检出到 `source/`；Docker context 为 `source/`，Dockerfile 为 `source/src/.../Dockerfile`。
-- 源码 `main` 合入新版 Dockerfile 前，旧提交若仍有内容不同的 `Dockerfile.github`，沿用该提交的迁移版构建定义。切换后删除这一步路径选择。
-- 每项的 builder 编译成功后制作运行镜像。矩阵不因单项失败取消其它项，整体摘要准确反映五项结果；某项失败不回滚其它已成功制作/推送的镜像。
-- validate 使用临时本地镜像；runner 结束后不保留镜像。publish 发布 `<服务>_main` 固定标签，并同时保留 `<服务>_<私有SHA>-<公共run_id>-<attempt>` 版本标签；main 发布使用独立并发组，取消被新发布替代的旧运行。
+- validate 使用五服务矩阵并行构建。publish 在同一台 runner 制作五个镜像，整批成功后登录一次，先推追溯 tag，再更新固定 tag。推送中途失败时汇总已确认更新的固定 tag。
+- validate 使用临时本地镜像；runner 结束后不保留镜像。publish 发布 `<服务>_main` 固定标签，并同时保留 `<服务>_<私有SHA>-<公共run_id>-<attempt>` 版本标签；main 发布串行执行，后续请求不会自动取消当前发布。
 - 当前沿用阿里云仓库 `registry.cn-chengdu.aliyuncs.com/yoyosoft/knightboss`。推送不是部署，不改现有测试环境使用的 dev/fix-prod 标签。
 - Uni-app 保留 NGINX_WAITHOST/NGINX_WAITPORT（默认 localhost:80）。官方 Nginx 的启动钩子复用 Rider 现有 wait-for-it.sh，在依赖 TCP 就绪后继续原 Nginx 启动流程。
-- 保留源码 revision 和 Vue buildId。摘要给出模式、镜像、digest 和实际结果；不将构建成功写成部署或业务测试通过。
+- 保留源码 revision 和 Vue buildId。摘要记录实际构建与推送结果，镜像 digest 见推送日志。部署由 171 的手动发布流程执行。
 - 首版只使用 runner 内 BuildKit 缓存，不向公开仓库导出包含私有源码层的构建缓存，不上传整个 checkout 或 Docker build record。
 - 本仓库日志和摘要公开可见，启用前须确认公开范围；不要把真实凭据提交到任一仓库。
 
-本地维护路径是 `D:/new-code/github/.github`，因此工作流路径是
-`D:/new-code/github/.github/.github/workflows/rider-build.yml`。
-私有端位于 `D:/new-code/github/Knight-boss/.github/workflows/request-public-build.yml`。
-两者分别维护、提交和启用，不修改参考 YoyoBoot 仓库。
+本地公共 checkout 为 `D:/new-code/github/ltm0203/.github`。工作流与脚本在私有 Rider 的
+`src/tools/public-build-runner/public-repository/` 维护，以同一批文件同步到本仓库。
+私有触发仍位于 Rider 根 `.github/workflows/request-public-build.yml`。
 
-本地合同回归（需要 Python 3 和 PyYAML，在 Rider Git 根执行）：
+从 Rider 的 `src/` 核对同步和运行本地回归：
 
 ```powershell
-python src/.github/scripts/testing/test_public_build_runner.py --public-repo ../.github -v
+$publicRepo = 'D:/new-code/github/ltm0203/.github'
+pwsh -File tools/public-build-runner/Sync-RiderPublicBuild.ps1 -PublicRepo $publicRepo -Check
+python tools/public-build-runner/tests/test_public_build_runner.py --public-repo $publicRepo -v
 ```
 
 这组检查只验证签名收发、分支/推送边界和文件接线，不加入 push 流程，不能替代五镜像真实构建。
