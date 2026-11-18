@@ -19,6 +19,8 @@ jobs:
     outputs:
       source-sha: ${{ steps.validate.outputs.source_sha }}
       source-ref: ${{ steps.validate.outputs.source_ref }}
+      source-actor: ${{ steps.validate.outputs.source_actor }}
+      source-event: ${{ steps.validate.outputs.source_event }}
       build-mode: ${{ steps.validate.outputs.build_mode }}
     steps:
       - name: Validate signed Rider request
@@ -32,6 +34,8 @@ jobs:
           SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
           SOURCE_BEFORE_SHA: ${{ github.event.client_payload.source_before_sha }}
           SOURCE_RUN_ID: ${{ github.event.client_payload.source_run_id }}
+          SOURCE_ACTOR: ${{ github.event.client_payload.source_actor }}
+          SOURCE_EVENT: ${{ github.event.client_payload.source_event }}
           BUILD_INTENT: ${{ github.event.client_payload.request.build_intent }}
           BUILD_TARGET: ${{ github.event.client_payload.request.build_target }}
           BUILD_MODE: ${{ github.event.client_payload.request.build_mode }}
@@ -47,7 +51,7 @@ jobs:
               raise SystemExit('Request must originate from the configured Rider repository.')
           if not env.get('DISPATCH_HMAC_SECRET'):
               raise SystemExit('RIDER_DISPATCH_HMAC_SECRET is required.')
-          if env['PROTOCOL'] != 'yoyoboot-public-build/v4':
+          if env['PROTOCOL'] not in ('yoyoboot-public-build/v4', 'yoyoboot-public-build/v5'):
               raise SystemExit('Unsupported protocol.')
           ref = env['SOURCE_REF']
           branch = ref.removeprefix('refs/heads/')
@@ -61,7 +65,7 @@ jobs:
           if not re.fullmatch(r'[1-9][0-9]*', env['SOURCE_RUN_ID']):
               raise SystemExit('Invalid source run id.')
           if env['BUILD_INTENT'] != 'image' or env['BUILD_TARGET'] != 'all':
-              raise SystemExit('Rider only builds all six images.')
+              raise SystemExit('Rider only builds all five images.')
           if env['BUILD_MODE'] not in ('validate', 'publish') or (env['BUILD_MODE'] == 'publish' and branch != 'main'):
               raise SystemExit('Publishing is only allowed on main.')
           if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', env['NONCE']):
@@ -71,12 +75,18 @@ jobs:
               raise SystemExit('Request expired; send a fresh signed request from the private repository.')
           keys = ('PROTOCOL', 'SOURCE_REPOSITORY', 'SOURCE_REF', 'SOURCE_SHA', 'SOURCE_BEFORE_SHA',
                   'SOURCE_RUN_ID', 'BUILD_INTENT', 'BUILD_TARGET', 'BUILD_MODE', 'ISSUED_AT', 'NONCE')
+          actor = event = ''
+          if env['PROTOCOL'] == 'yoyoboot-public-build/v5':
+              actor, event = env['SOURCE_ACTOR'], env['SOURCE_EVENT']
+              if not re.fullmatch(r'[a-zA-Z0-9-]{1,39}(?:\[bot\])?', actor) or event not in ('push', 'workflow_dispatch'):
+                  raise SystemExit('Invalid source actor or event.')
+              keys += ('SOURCE_ACTOR', 'SOURCE_EVENT')
           material = ''.join(env[key] + '\n' for key in keys)
           expected = base64.b64encode(hmac.new(env['DISPATCH_HMAC_SECRET'].encode(), material.encode(), hashlib.sha256).digest()).decode()
           if not hmac.compare_digest(expected, env['SIGNATURE']):
               raise SystemExit('Invalid signature.')
           with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write(f"source_sha={env['SOURCE_SHA']}\nsource_ref={ref}\nbuild_mode={env['BUILD_MODE']}\n")
+              output.write(f"source_sha={env['SOURCE_SHA']}\nsource_ref={ref}\nbuild_mode={env['BUILD_MODE']}\nsource_actor={actor}\nsource_event={event}\n")
           PY
 
   build-images:
@@ -222,6 +232,8 @@ jobs:
         env:
           ACTIONS_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ needs.validate-request.outputs.source-ref }}
+          SOURCE_ACTOR: ${{ needs.validate-request.outputs.source-actor }}
+          SOURCE_EVENT: ${{ needs.validate-request.outputs.source-event }}
           SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
           BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
           BUILD_RESULT: ${{ needs.build-images.result }}
@@ -235,6 +247,7 @@ jobs:
           import hmac
           import json
           import os
+          import re
           import urllib.parse
           import urllib.request
 
@@ -266,8 +279,25 @@ jobs:
 
           now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
           branch = env['SOURCE_REF'].removeprefix('refs/heads/')
-          lines = [title, f"分支 / 提交：{branch} / {env['SOURCE_SHA'][:10]}",
-                   f"北京时间：{now:%Y-%m-%d %H:%M:%S}", detail]
+          branch = re.sub(r'([\\`*_{}\[\]()#+.!|<>])', r'\\\1', branch)
+          source_repo = 'ltm0203/Knight-boss'
+          source_url = f"{env['GITHUB_SERVER_URL']}/{source_repo}"
+          sha = env['SOURCE_SHA']
+          lines = [f'### {title} · Knight-boss',
+                   '📍 阶段：' + ('镜像发布' if publish else '分支验证'),
+                   f"🕒 时间：{now:%Y-%m-%d %H:%M:%S}（北京时间）",
+                   f'📂 源码仓库：[{source_repo}]({source_url})']
+          actor = env.get('SOURCE_ACTOR', '')
+          if actor:
+              label = '推送者' if env['SOURCE_EVENT'] == 'push' else '发起人'
+              profile = f"{env['GITHUB_SERVER_URL']}/"
+              profile += 'apps/' + actor.removesuffix('[bot]') if actor.endswith('[bot]') else actor
+              display = actor.replace('[', r'\[').replace(']', r'\]')
+              lines.append(f'👤 {label}：[{display}]({profile})')
+          lines += [f'📦 分支：{branch}', f'📝 提交：[{sha}]({source_url}/commit/{sha})',
+                    f'🔗 构建日志：[GitHub Actions #{run_id}]({run_url})']
+          if result == 'success':
+              lines.append('📊 结果：5 / 5 镜像通过')
           if result != 'success':
               jobs_url = f"{env['GITHUB_API_URL']}/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=30"
               try:
@@ -277,16 +307,16 @@ jobs:
                   for job in jobs:
                       if job['name'].startswith('build-images (') and job['conclusion'] not in ('success', None):
                           service = job['name'].removeprefix('build-images (').split(',', 1)[0]
-                          lines.append(f"{service}：{job['conclusion']} · {job['html_url']}")
+                          lines.append(f"❗ {service} · [{job['conclusion']} 日志]({job['html_url']})")
               except (OSError, ValueError, KeyError):
                   print('::warning::Unable to read individual Rider build jobs; sending overall result.')
-          lines.append('Actions：' + run_url)
+          lines.append('🧭 说明：' + detail)
 
           timestamp = str(int(now.timestamp() * 1000))
           signature = hmac.digest(secret.encode(), (timestamp + '\n' + secret).encode(), hashlib.sha256)
           suffix = urllib.parse.urlencode({'timestamp': timestamp, 'sign': base64.b64encode(signature).decode()})
           uri = parsed._replace(query=f'{parsed.query}&{suffix}', fragment='').geturl()
-          payload = {'msgtype': 'text', 'text': {'content': '\n'.join(lines)}}
+          payload = {'msgtype': 'markdown', 'markdown': {'title': title, 'text': '\n\n'.join(lines)}}
           request = urllib.request.Request(uri, data=json.dumps(payload, ensure_ascii=False).encode(),
                                            headers={'Content-Type': 'application/json'}, method='POST')
           try:
