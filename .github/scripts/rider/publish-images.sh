@@ -2,31 +2,27 @@
 set -euo pipefail
 
 manifest="$(dirname -- "${BASH_SOURCE[0]}")/images.json"
-[[ "$IMAGE_REGISTRY" =~ ^[a-z0-9.-]+(:[0-9]+)?$ ]] || { echo 'Invalid RIDER_IMAGE_REGISTRY.' >&2; exit 1; }
-[[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]] || { echo 'Invalid RIDER_IMAGE_REPOSITORY.' >&2; exit 1; }
+references="${1:?Pass the directory of version tags.}"
 repository="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-build_id="${SOURCE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 image_list=$(jq -ber 'keys_unsorted[]' "$manifest")
 mapfile -t images <<< "$image_list"
 
 updated=()
 trap 'echo "updated_tags=${updated[*]}" >> "$GITHUB_OUTPUT"' EXIT
+declare -A versions
 for image in "${images[@]}"; do
-    docker image inspect "rider-local/${image}:${SOURCE_SHA}" >/dev/null
+    version=$(<"$references/$image.txt")
+    if [[ ! "$version" =~ ^${image}_${SOURCE_SHA}-${GITHUB_RUN_ID}-[1-9][0-9]*$ ]]; then
+        echo "::error::Invalid version reference for $image"
+        exit 1
+    fi
+    versions[$image]="$repository:$version"
+    docker buildx imagetools inspect "${versions[$image]}" >/dev/null
 done
 
 for image in "${images[@]}"; do
-    version_tag="$repository:${image}_${build_id}"
-    docker tag "rider-local/${image}:${SOURCE_SHA}" "$version_tag"
-    docker push "$version_tag"
-    printf -- '- %s: trace tag pushed (`%s`)\n' "$image" "$version_tag" >> "$GITHUB_STEP_SUMMARY"
-done
-
-for image in "${images[@]}"; do
-    version_tag="$repository:${image}_${build_id}"
     fixed_tag="$repository:${image}_main"
-    docker tag "$version_tag" "$fixed_tag"
-    docker push "$fixed_tag"
+    docker buildx imagetools create --prefer-index=false --tag "$fixed_tag" "${versions[$image]}"
     updated+=("${image}_main")
     printf -- '- %s: fixed tag updated (`%s`)\n' "$image" "$fixed_tag" >> "$GITHUB_STEP_SUMMARY"
 done

@@ -53,18 +53,10 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 3
       matrix:
         image: ${{ fromJSON(needs.validate-request.outputs.images) }}
-    # Only publication shares a concurrency group. A running push finishes before the next one starts.
-    concurrency:
-      group: ${{ needs.validate-request.outputs.build-mode == 'publish' && 'rider-main-publish' || format('rider-validate-{0}-{1}', github.run_id, matrix.image) }}
-      cancel-in-progress: false
     permissions:
       contents: read
-    outputs:
-      images-built: ${{ steps.build.outputs.images_built }}
-      updated-tags: ${{ steps.publish.outputs.updated_tags }}
     env:
       SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
       BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
@@ -86,29 +78,101 @@ jobs:
           fetch-depth: 1
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Compile and build images
+      - name: Compile and build image
         id: build
         shell: bash
         run: bash .github/scripts/rider/build-images.sh "$IMAGE_SELECTION"
-      - name: Log in for explicit publication
-        if: ${{ success() && env.BUILD_MODE == 'publish' && steps.build.outputs.images_built == 'true' }}
+      - name: Log in for version upload
+        if: ${{ env.BUILD_MODE == 'publish' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ vars.RIDER_IMAGE_REGISTRY }}
           username: ${{ vars.RIDER_IMAGE_USERNAME }}
           password: ${{ secrets.RIDER_IMAGE_PASSWORD }}
 
-      - name: Push Rider images
-        if: ${{ success() && env.BUILD_MODE == 'publish' && steps.build.outputs.images_built == 'true' }}
+      - name: Push version image
+        if: ${{ env.BUILD_MODE == 'publish' }}
+        shell: bash
+        env:
+          IMAGE_REGISTRY: ${{ vars.RIDER_IMAGE_REGISTRY }}
+          IMAGE_REPOSITORY: ${{ vars.RIDER_IMAGE_REPOSITORY }}
+          LOCAL_TAG: ${{ steps.build.outputs.local_tag }}
+          VERSION_TAG: ${{ steps.build.outputs.version_tag }}
+        run: |
+          image="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${VERSION_TAG}"
+          docker tag "$LOCAL_TAG" "$image"
+          docker push "$image"
+          printf '%s\n' "$VERSION_TAG" > "$RUNNER_TEMP/$IMAGE_SELECTION.txt"
+      - name: Record published version
+        if: ${{ env.BUILD_MODE == 'publish' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rider-version-${{ matrix.image }}
+          path: ${{ runner.temp }}/${{ matrix.image }}.txt
+          if-no-files-found: error
+          overwrite: true
+
+  publish-images:
+    needs: [validate-request, build-images]
+    if: ${{ needs.validate-request.outputs.build-mode == 'publish' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: rider-main-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      updated-tags: ${{ steps.publish.outputs.updated_tags }}
+      current-source: ${{ steps.source.outputs.current }}
+    env:
+      SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
+    steps:
+      - name: Check current Rider main
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RIDER_PRIVATE_SOURCE_PAT }}
+        run: |
+          current_sha=$(gh api repos/ltm0203/Knight-boss/git/ref/heads/main --jq .object.sha)
+          [[ "$current_sha" =~ ^[a-f0-9]{40}$ ]]
+          if [[ "$current_sha" == "$SOURCE_SHA" ]]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'Rider main has advanced; fixed tags were not updated.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Check out public build scripts
+        if: ${{ steps.source.outputs.current == 'true' }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Collect published versions
+        if: ${{ steps.source.outputs.current == 'true' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: rider-version-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/rider-versions
+      - name: Log in for fixed tag publication
+        if: ${{ steps.source.outputs.current == 'true' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.RIDER_IMAGE_REGISTRY }}
+          username: ${{ vars.RIDER_IMAGE_USERNAME }}
+          password: ${{ secrets.RIDER_IMAGE_PASSWORD }}
+      - name: Update fixed tags
+        if: ${{ steps.source.outputs.current == 'true' }}
         id: publish
         shell: bash
         env:
           IMAGE_REGISTRY: ${{ vars.RIDER_IMAGE_REGISTRY }}
           IMAGE_REPOSITORY: ${{ vars.RIDER_IMAGE_REPOSITORY }}
-        run: bash .github/scripts/rider/publish-images.sh
+        run: bash .github/scripts/rider/publish-images.sh "$RUNNER_TEMP/rider-versions"
 
   summary:
-    needs: [validate-request, build-images]
+    needs: [validate-request, build-images, publish-images]
     if: ${{ always() }}
     permissions:
       actions: read
@@ -126,13 +190,24 @@ jobs:
         env:
           REQUEST_RESULT: ${{ needs.validate-request.result }}
           BUILD_RESULT: ${{ needs.build-images.result }}
+          BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
+          PUBLISH_RESULT: ${{ needs.publish-images.result }}
+          CURRENT_SOURCE: ${{ needs.publish-images.outputs.current-source }}
         run: |
+          fixed_tags="$PUBLISH_RESULT"
+          if [[ "$CURRENT_SOURCE" == false ]]; then
+            fixed_tags='skipped (Rider main advanced)'
+          fi
           {
             echo '## Rider image build'
-            echo "Request: ${REQUEST_RESULT}; image pipeline: ${BUILD_RESULT}"
+            echo "Request: ${REQUEST_RESULT}; image pipeline: ${BUILD_RESULT}; fixed tags: ${fixed_tags}"
             echo 'This workflow does not run automated tests or deploy services.'
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$REQUEST_RESULT" = success && test "$BUILD_RESULT" = success
+          test "$REQUEST_RESULT" = success
+          test "$BUILD_RESULT" = success
+          if [[ "$BUILD_MODE" == publish ]]; then
+            test "$PUBLISH_RESULT" = success
+          fi
       - name: Notify Rider build result
         if: ${{ !cancelled() && needs.validate-request.result == 'success' }}
         continue-on-error: true
@@ -145,8 +220,9 @@ jobs:
           SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
           BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
           BUILD_RESULT: ${{ needs.build-images.result }}
-          IMAGES_BUILT: ${{ needs.build-images.outputs.images-built }}
-          UPDATED_TAGS: ${{ needs.build-images.outputs.updated-tags }}
+          PUBLISH_RESULT: ${{ needs.publish-images.result }}
+          CURRENT_SOURCE: ${{ needs.publish-images.outputs.current-source }}
+          UPDATED_TAGS: ${{ needs.publish-images.outputs.updated-tags }}
           NOTIFY_WEBHOOK: ${{ secrets.RIDER_BUILD_NOTIFY_WEBHOOK }}
           NOTIFY_SECRET: ${{ secrets.RIDER_BUILD_NOTIFY_SECRET }}
         run: python3 .github/scripts/rider/notify-result.py

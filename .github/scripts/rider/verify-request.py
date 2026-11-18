@@ -48,6 +48,5 @@ with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
     output.write(f"source_sha={env['SOURCE_SHA']}\nsource_ref={ref}\nbuild_mode={env['BUILD_MODE']}\nsource_actor={actor}\nsource_event={event}\n")
 
 images = json.loads(Path(__file__).with_name('images.json').read_text(encoding='utf-8'))
-selected = ['all'] if env['BUILD_MODE'] == 'publish' else list(images)
 with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-    output.write(f"images={json.dumps(selected)}\n")
+    output.write(f"images={json.dumps(list(images))}\n")

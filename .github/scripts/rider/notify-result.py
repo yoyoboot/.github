@@ -23,18 +23,53 @@ if parsed.scheme != 'https' or parsed.netloc != 'oapi.dingtalk.com' or parsed.pa
 repo, run_id = env['GITHUB_REPOSITORY'], env['GITHUB_RUN_ID']
 run_url = f"{env['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}"
 publish = env['BUILD_MODE'] == 'publish'
-result = env['BUILD_RESULT']
-built = env.get('IMAGES_BUILT') == 'true'
+build_result = env['BUILD_RESULT']
+publish_result = env.get('PUBLISH_RESULT')
+success = build_result == 'success' and (not publish or publish_result == 'success')
+superseded = publish and success and env.get('CURRENT_SOURCE') == 'false'
 updated = env.get('UPDATED_TAGS', '').split()
-if result == 'success':
+
+failures = []
+if not success:
+    jobs_url = f"{env['GITHUB_API_URL']}/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=30"
+    try:
+        request = urllib.request.Request(jobs_url, headers={'Authorization': 'Bearer ' + env['ACTIONS_TOKEN']})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            jobs = json.load(response)['jobs']
+        for job in jobs:
+            if job['conclusion'] in ('success', 'skipped', None):
+                continue
+            name = job['name']
+            if name.startswith('build-images ('):
+                service = name.removeprefix('build-images (').rstrip(')').split(',', 1)[0]
+                built = any(step['name'] == 'Compile and build image' and step['conclusion'] == 'success'
+                            for step in job.get('steps', []))
+                failures.append((service, '版本镜像上传' if publish and built else '镜像构建', job))
+            elif name == 'publish-images':
+                failures.append(('固定标签', '固定标签发布', job))
+    except (OSError, ValueError, KeyError):
+        print('::warning::Unable to read individual Rider build jobs; sending overall result.')
+
+if superseded:
+    title = 'ℹ️ Rider 固定标签更新已跳过'
+    stage = '固定标签发布'
+    detail = 'main 已有更新的提交，本次版本镜像已保留。'
+elif success:
     title = '✅ Rider 镜像发布成功' if publish else '✅ Rider 构建验证通过'
+    stage = '固定标签发布' if publish else '分支验证'
     detail = '五个镜像已推送，171 等待手动发布。' if publish else '五个镜像验证通过，未推送。'
-elif publish and built:
-    title = '❌ Rider 镜像推送失败'
-    detail = '五个镜像构建通过。请核对推送日志，等整批成功后再发布 171。'
+elif publish and build_result == 'success':
+    title = '❌ Rider 固定标签发布失败'
+    stage = '固定标签发布'
+    detail = '五个版本镜像已上传。请核对固定标签发布日志。'
+elif publish and failures and all(stage == '版本镜像上传' for _, stage, _ in failures):
+    title = '❌ Rider 版本镜像上传失败'
+    stage = '版本镜像上传'
+    detail = '请查看失败服务的上传日志。固定标签尚未更新。'
 else:
     title = '❌ Rider 镜像构建失败' if publish else '❌ Rider 构建验证失败'
-    detail = '五个镜像未全部构建成功，未开始推送。' if publish else '请查看失败项的构建日志。'
+    stage = '镜像构建' if publish else '分支验证'
+    detail = '请查看失败项的构建日志。固定标签尚未更新。' if publish else '请查看失败项的构建日志。'
 
 now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
 branch = env['SOURCE_REF'].removeprefix('refs/heads/')
@@ -43,7 +78,7 @@ source_repo = 'ltm0203/Knight-boss'
 source_url = f"{env['GITHUB_SERVER_URL']}/{source_repo}"
 sha = env['SOURCE_SHA']
 lines = [f'### {title} · Knight-boss',
-         '📍 阶段：' + (('镜像推送' if built else '镜像构建') if publish else '分支验证'),
+         '📍 阶段：' + stage,
          f"🕒 时间：{now:%Y-%m-%d %H:%M:%S}（北京时间）",
          f'📂 源码仓库：[{source_repo}]({source_url})']
 actor = env.get('SOURCE_ACTOR', '')
@@ -55,25 +90,13 @@ if actor:
     lines.append(f'👤 {label}：[{display}]({profile})')
 lines += [f'📦 分支：{branch}', f'📝 提交：[{sha}]({source_url}/commit/{sha})',
           f'🔗 构建日志：[GitHub Actions #{run_id}]({run_url})']
-if result == 'success':
+if success:
     lines.append('📊 结果：5 / 5 镜像通过')
-if publish and built and result != 'success':
+if publish and build_result == 'success' and not success:
     lines.append('📊 构建结果：5 / 5 镜像通过')
     lines.append('📦 已确认更新的固定 tag：' + ('、'.join(updated) if updated else '无'))
-if result != 'success':
-    jobs_url = f"{env['GITHUB_API_URL']}/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=30"
-    try:
-        request = urllib.request.Request(jobs_url, headers={'Authorization': 'Bearer ' + env['ACTIONS_TOKEN']})
-        with urllib.request.urlopen(request, timeout=10) as response:
-            jobs = json.load(response)['jobs']
-        for job in jobs:
-            if job['name'].startswith('build-images (') and job['conclusion'] not in ('success', None):
-                service = job['name'].removeprefix('build-images (').rstrip(')').split(',', 1)[0]
-                if service == 'all':
-                    service = '镜像推送' if built else '整批构建'
-                lines.append(f"❗ {service} · [{job['conclusion']} 日志]({job['html_url']})")
-    except (OSError, ValueError, KeyError):
-        print('::warning::Unable to read individual Rider build jobs; sending overall result.')
+for service, phase, job in failures:
+    lines.append(f"❗ {service} · [{phase}日志]({job['html_url']})")
 lines.append('🧭 说明：' + detail)
 
 timestamp = str(int(now.timestamp() * 1000))

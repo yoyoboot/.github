@@ -42,8 +42,8 @@ Markdown 消息提供可点击的源码仓库、推送者或发起人、完整�
 ### 产物和结果
 
 - 公共 runner 将私有 Git 根检出到 `source/`；Docker context 为 `source/`，Dockerfile 为 `source/src/.../Dockerfile`。
-- validate 使用五服务矩阵并行构建。publish 在同一台 runner 制作五个镜像，整批成功后登录一次，先推追溯 tag，再更新固定 tag。推送中途失败时汇总已确认更新的固定 tag。
-- validate 使用临时本地镜像；runner 结束后不保留镜像。publish 发布 `<服务>_main` 固定标签，并同时保留 `<服务>_<私有SHA>-<公共run_id>-<attempt>` 版本标签；main 发布串行执行，后续请求不会自动取消当前发布。
+- validate 和 publish 共用五服务构建矩阵。publish 由各构建作业上传版本镜像，使用文本制品交接实际 tag。五项成功后，独立发布作业更新固定 tag，失败时汇总已确认更新的固定 tag。
+- validate 使用临时本地镜像；runner 结束后不保留镜像。publish 发布 `<服务>_main` 固定标签，并同时保留 `<服务>_<私有SHA>-<公共run_id>-<attempt>` 版本标签；固定标签更新串行执行。等待发布期间如 main 已推进，则本次保留版本标签并跳过固定标签更新。构建缓存保留在 runner。
 - 当前沿用阿里云仓库 `registry.cn-chengdu.aliyuncs.com/yoyosoft/knightboss`。推送不是部署，不改现有测试环境使用的 dev/fix-prod 标签。
 - Uni-app 保留 NGINX_WAITHOST/NGINX_WAITPORT（默认 localhost:80）。官方 Nginx 的启动钩子复用 Rider 现有 wait-for-it.sh，在依赖 TCP 就绪后继续原 Nginx 启动流程。
 - 保留源码 revision 和 Vue buildId。摘要记录实际构建与推送结果，镜像 digest 见推送日志。部署由 171 的手动发布流程执行。
