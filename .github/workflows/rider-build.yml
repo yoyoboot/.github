@@ -198,6 +198,8 @@ jobs:
   summary:
     needs: [validate-request, build-images]
     if: ${{ always() }}
+    permissions:
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -209,7 +211,91 @@ jobs:
         run: |
           {
             echo '## Rider image build'
-            echo "Request: ${REQUEST_RESULT}; six-image build: ${BUILD_RESULT}"
+            echo "Request: ${REQUEST_RESULT}; five-image build: ${BUILD_RESULT}"
             echo 'This workflow does not run automated tests or deploy services.'
           } >> "$GITHUB_STEP_SUMMARY"
           test "$REQUEST_RESULT" = success && test "$BUILD_RESULT" = success
+      - name: Notify Rider build result
+        if: ${{ !cancelled() && needs.validate-request.result == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          ACTIONS_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ needs.validate-request.outputs.source-ref }}
+          SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
+          BUILD_MODE: ${{ needs.validate-request.outputs.build-mode }}
+          BUILD_RESULT: ${{ needs.build-images.result }}
+          NOTIFY_WEBHOOK: ${{ secrets.RIDER_BUILD_NOTIFY_WEBHOOK }}
+          NOTIFY_SECRET: ${{ secrets.RIDER_BUILD_NOTIFY_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import datetime
+          import hashlib
+          import hmac
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          env = os.environ
+          webhook = env.get('NOTIFY_WEBHOOK', '')
+          secret = env.get('NOTIFY_SECRET', '')
+          if not webhook or not secret:
+              print('::notice::Rider notification skipped: configure the DingTalk webhook and signing secret.')
+              raise SystemExit(0)
+
+          parsed = urllib.parse.urlsplit(webhook)
+          if parsed.scheme != 'https' or parsed.netloc != 'oapi.dingtalk.com' or parsed.path != '/robot/send':
+              print('::warning::Rider notification webhook is not a supported DingTalk robot URL.')
+              raise SystemExit(1)
+
+          repo, run_id = env['GITHUB_REPOSITORY'], env['GITHUB_RUN_ID']
+          run_url = f"{env['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}"
+          publish = env['BUILD_MODE'] == 'publish'
+          result = env['BUILD_RESULT']
+          if result == 'success':
+              title = '✅ Rider 镜像发布成功' if publish else '✅ Rider 构建验证通过'
+              detail = '五个镜像已推送，171 等待手动发布。' if publish else '五个镜像验证通过，未推送。'
+          elif result == 'cancelled':
+              title = '⏹️ Rider 构建已取消'
+              detail = '发布已取消，固定 tag 可能只更新了一部分。' if publish else '本次验证已取消。'
+          else:
+              title = '❌ Rider 镜像发布失败' if publish else '❌ Rider 构建验证失败'
+              detail = '固定 tag 可能只更新了一部分，请核对任务后再发布 171。' if publish else '请查看失败项的构建日志。'
+
+          now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+          branch = env['SOURCE_REF'].removeprefix('refs/heads/')
+          lines = [title, f"分支 / 提交：{branch} / {env['SOURCE_SHA'][:10]}",
+                   f"北京时间：{now:%Y-%m-%d %H:%M:%S}", detail]
+          if result != 'success':
+              jobs_url = f"{env['GITHUB_API_URL']}/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=30"
+              try:
+                  request = urllib.request.Request(jobs_url, headers={'Authorization': 'Bearer ' + env['ACTIONS_TOKEN']})
+                  with urllib.request.urlopen(request, timeout=10) as response:
+                      jobs = json.load(response)['jobs']
+                  for job in jobs:
+                      if job['name'].startswith('build-images (') and job['conclusion'] not in ('success', None):
+                          service = job['name'].removeprefix('build-images (').split(',', 1)[0]
+                          lines.append(f"{service}：{job['conclusion']} · {job['html_url']}")
+              except (OSError, ValueError, KeyError):
+                  print('::warning::Unable to read individual Rider build jobs; sending overall result.')
+          lines.append('Actions：' + run_url)
+
+          timestamp = str(int(now.timestamp() * 1000))
+          signature = hmac.digest(secret.encode(), (timestamp + '\n' + secret).encode(), hashlib.sha256)
+          suffix = urllib.parse.urlencode({'timestamp': timestamp, 'sign': base64.b64encode(signature).decode()})
+          uri = parsed._replace(query=f'{parsed.query}&{suffix}', fragment='').geturl()
+          payload = {'msgtype': 'text', 'text': {'content': '\n'.join(lines)}}
+          request = urllib.request.Request(uri, data=json.dumps(payload, ensure_ascii=False).encode(),
+                                           headers={'Content-Type': 'application/json'}, method='POST')
+          try:
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  receipt = json.load(response)
+              if receipt.get('errcode') != 0:
+                  raise ValueError('DingTalk rejected the message')
+          except (OSError, ValueError, AttributeError):
+              print('::warning::Rider DingTalk notification failed. The image build result is unchanged.')
+              raise SystemExit(1)
+          print('Rider DingTalk notification sent.')
+          PY

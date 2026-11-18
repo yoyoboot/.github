@@ -7,7 +7,7 @@
 全量编译并制作 HostApi、SyncJob、Migrator、Vue、Uni-app H5 五个镜像。
 这里不保存 Rider 源码副本、不做 PR 状态回写、不运行自动测试、不部署或执行数据库迁移。
 
-目前为本地实现；文件需要提交到本仓库默认分支并配置 Secrets 后才能远程运行。
+工作流已在本仓库默认分支启用。
 私有端也必须提交其 dispatcher、五个标准 Dockerfile 和公网 NuGet.Config，
 才能从对应提交构建。请求发送成功不代表镜像已构建成功，实际结果查看本仓库 Actions。
 
@@ -24,6 +24,11 @@
 | 本仓库，可选推送 | Variable `RIDER_IMAGE_USERNAME` | Registry 登录名 |
 | 本仓库，可选推送 | Secret `RIDER_IMAGE_PASSWORD` | Registry 推送凭据，仅 publish 步骤读取 |
 
+可选群通知在本仓库配置 Actions Secrets `RIDER_BUILD_NOTIFY_WEBHOOK` 和
+`RIDER_BUILD_NOTIFY_SECRET`，分别为钉钉机器人 Webhook 和加签密钥。已验签的构建
+结束后按 validate/publish 的实际结果发一条通知。缺少配置时跳过，发送失败只记警告。
+失败消息附出错服务及任务链接。发布成功表示五镜像已推送，171 仍由运维手动发布。
+
 所有合法分支均可 push 构建；普通开发分支为 `validate`，不推送。PR 合并到 main（或直接 push main）自动使用 `publish`，编译成功后推送；手动执行仍可明确选择 validate/publish，publish 只允许 main。两端使用 git check-ref-format 校验分支格式，不维护名称白名单；tag 和分支删除不触发构建。目标公共仓库和来源私有仓库固定在代码中，不再配置仓库名 Secret。
 
 签名保持 `yoyoboot-public-build/v4` 的字段布局；Rider 专用策略固定
@@ -35,7 +40,7 @@
 
 - 公共 runner 将私有 Git 根检出到 `source/`；Docker context 为 `source/`，Dockerfile 为 `source/src/.../Dockerfile`。
 - 源码 `main` 合入新版 Dockerfile 前，旧提交若仍有内容不同的 `Dockerfile.github`，沿用该提交的迁移版构建定义。切换后删除这一步路径选择。
-- 每项的 builder 编译成功后制作运行镜像。矩阵不因单项失败取消其它项，整体摘要准确反映六项结果；某项失败不回滚其它已成功制作/推送的镜像。
+- 每项的 builder 编译成功后制作运行镜像。矩阵不因单项失败取消其它项，整体摘要准确反映五项结果；某项失败不回滚其它已成功制作/推送的镜像。
 - validate 使用临时本地镜像；runner 结束后不保留镜像。publish 发布 `<服务>_main` 固定标签，并同时保留 `<服务>_<私有SHA>-<公共run_id>-<attempt>` 版本标签；main 发布使用独立并发组，取消被新发布替代的旧运行。
 - 当前沿用阿里云仓库 `registry.cn-chengdu.aliyuncs.com/yoyosoft/knightboss`。推送不是部署，不改现有测试环境使用的 dev/fix-prod 标签。
 - Uni-app 保留 NGINX_WAITHOST/NGINX_WAITPORT（默认 localhost:80）。官方 Nginx 的启动钩子复用 Rider 现有 wait-for-it.sh，在依赖 TCP 就绪后继续原 Nginx 启动流程。
@@ -54,7 +59,7 @@
 python src/.github/scripts/testing/test_public_build_runner.py --public-repo ../.github -v
 ```
 
-这组检查只验证签名收发、分支/推送边界和文件接线，不加入 push 流程，不能替代六镜像真实构建。
+这组检查只验证签名收发、分支/推送边界和文件接线，不加入 push 流程，不能替代五镜像真实构建。
 
 欢迎来到 `yoyoboot/.github` 仓库！
 
