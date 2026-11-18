@@ -22,7 +22,10 @@ done
 
 for image in "${images[@]}"; do
     fixed_tag="$repository:${image}_main"
-    docker buildx imagetools create --prefer-index=false --tag "$fixed_tag" "${versions[$image]}"
+    if ! docker buildx imagetools create --prefer-index=false --tag "$fixed_tag" "${versions[$image]}"; then
+        printf 'failed_tag=%s_main\n' "$image" >> "$GITHUB_OUTPUT"
+        exit 1
+    fi
     updated+=("${image}_main")
     printf -- '- %s: fixed tag updated (`%s`)\n' "$image" "$fixed_tag" >> "$GITHUB_STEP_SUMMARY"
 done

@@ -91,7 +91,9 @@ jobs:
           password: ${{ secrets.RIDER_IMAGE_PASSWORD }}
 
       - name: Push version image
+        id: push-version
         if: ${{ env.BUILD_MODE == 'publish' }}
+        timeout-minutes: 26
         shell: bash
         env:
           IMAGE_REGISTRY: ${{ vars.RIDER_IMAGE_REGISTRY }}
@@ -101,8 +103,30 @@ jobs:
         run: |
           image="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${VERSION_TAG}"
           docker tag "$LOCAL_TAG" "$image"
-          docker push "$image"
-          printf '%s\n' "$VERSION_TAG" > "$RUNNER_TEMP/$IMAGE_SELECTION.txt"
+          timeout_seconds=720
+          for attempt in 1 2; do
+            echo "Uploading $IMAGE_SELECTION (attempt $attempt/2, timeout ${timeout_seconds}s)"
+            started=$SECONDS
+            if timeout --kill-after=15s "$timeout_seconds" docker push "$image"; then
+              printf '%s\n' "$VERSION_TAG" > "$RUNNER_TEMP/$IMAGE_SELECTION.txt"
+              exit 0
+            else
+              status=$?
+            fi
+            if [[ "$attempt" == 1 ]]; then
+              echo "::warning::Version upload exited with status $status. Retrying in 5 seconds."
+              sleep 5
+            fi
+          done
+          if (( status == 124 || (status == 137 && SECONDS - started >= timeout_seconds) )); then
+            echo 'upload_result=timeout' >> "$GITHUB_OUTPUT"
+            echo "::error::Version image upload timed out for $IMAGE_SELECTION."
+          fi
+          exit "$status"
+      - name: Version image upload timed out
+        if: ${{ failure() && steps.push-version.outputs.upload_result == 'timeout' }}
+        shell: bash
+        run: echo 'The version upload exhausted its time limit after retrying.'
       - name: Record published version
         if: ${{ env.BUILD_MODE == 'publish' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -124,6 +148,7 @@ jobs:
       contents: read
     outputs:
       updated-tags: ${{ steps.publish.outputs.updated_tags }}
+      failed-tag: ${{ steps.publish.outputs.failed_tag }}
       current-source: ${{ steps.source.outputs.current }}
     env:
       SOURCE_SHA: ${{ needs.validate-request.outputs.source-sha }}
@@ -223,6 +248,7 @@ jobs:
           PUBLISH_RESULT: ${{ needs.publish-images.result }}
           CURRENT_SOURCE: ${{ needs.publish-images.outputs.current-source }}
           UPDATED_TAGS: ${{ needs.publish-images.outputs.updated-tags }}
+          FAILED_TAG: ${{ needs.publish-images.outputs.failed-tag }}
           NOTIFY_WEBHOOK: ${{ secrets.RIDER_BUILD_NOTIFY_WEBHOOK }}
           NOTIFY_SECRET: ${{ secrets.RIDER_BUILD_NOTIFY_SECRET }}
         run: python3 .github/scripts/rider/notify-result.py
