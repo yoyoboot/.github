@@ -31,8 +31,11 @@ Markdown 消息提供可点击的源码仓库、推送者或发起人、完整�
 
 所有合法分支均可 push 构建；普通开发分支为 `validate`，不推送。PR 合并到 main（或直接 push main）自动使用 `publish`，编译成功后推送；手动执行仍可明确选择 validate/publish，publish 只允许 main。两端使用 git check-ref-format 校验分支格式，不维护名称白名单；tag 和分支删除不触发构建。目标公共仓库和来源私有仓库固定在代码中，不再配置仓库名 Secret。
 
-`yoyoboot-public-build/v5` 在 v4 已签名字段后追加源码触发账号和事件类型。公共端仍接收 v4，旧请求的通知不显示发起人。Rider 专用策略固定
-`build_intent=image`、`build_target=all`，不计算 before/head 差异。
+`yoyoboot-public-build/v6` 使用七个 `client_payload` 直接字段：`protocol`、`source_repository`、
+`source_ref`、`source_sha`、`request`、`issued_at`、`signature`。`request` 包含 `build_mode`、
+`source_actor`、`source_event`。签名按协议、仓库、分支引用、提交号、构建模式、时间、
+触发账号、触发事件的顺序，对每项追加换行后按 UTF-8 编码并计算 HMAC-SHA256/Base64。
+构建范围固定为五个镜像。公共端也接收现有 Rider 分支发来的 v4 和 v5 请求，v4 通知省略发起人。
 来源、签名、十分钟时间窗或 mode 不正确时，在 checkout 私有源码前失败。
 过期请求从私有入口重新运行发送新签名；不要只重跑公共端旧请求。
 
