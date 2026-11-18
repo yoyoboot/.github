@@ -34,8 +34,8 @@ jobs:
           SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
           SOURCE_BEFORE_SHA: ${{ github.event.client_payload.source_before_sha }}
           SOURCE_RUN_ID: ${{ github.event.client_payload.source_run_id }}
-          SOURCE_ACTOR: ${{ github.event.client_payload.source_actor }}
-          SOURCE_EVENT: ${{ github.event.client_payload.source_event }}
+          SOURCE_ACTOR: ${{ github.event.client_payload.request.source_actor }}
+          SOURCE_EVENT: ${{ github.event.client_payload.request.source_event }}
           BUILD_INTENT: ${{ github.event.client_payload.request.build_intent }}
           BUILD_TARGET: ${{ github.event.client_payload.request.build_target }}
           BUILD_MODE: ${{ github.event.client_payload.request.build_mode }}
